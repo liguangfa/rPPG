@@ -1,179 +1,149 @@
-from __future__ import division, print_function, absolute_import
-
-import tflearn
 import numpy as np
-import tensorflow as tf
-from tflearn.layers.conv import conv_2d,conv_3d
-
-import y
-from y import *
-from tflearn.data_utils import image_preloader
-import tflearn.datasets.imdb
-
+from encoder_decoder import Resnet3DBuilder1
+import pickle
 import os
-#os.environ["CUDA_VISIBLE_DEVICES"] = "0" # 閫夋嫨ID涓?鐨凣PU
-print('1:',tf.test.is_gpu_available())
+import math
+import tensorflow as tf
+from numpy import float32
+from keras.optimizers import Adam,SGD
+from tensorflow.compat.v1 import ConfigProto
+from tensorflow.compat.v1 import InteractiveSession
+from load_data import *
+from keras.models import load_model,Model
+from scipy.signal import find_peaks
+import keras
+from keras.losses import categorical_crossentropy
+from gendata_new import *
+from keras.layers import Lambda,Input,Embedding
+import keras.backend as K
 
+config = ConfigProto()
+config.gpu_options.allow_growth = True   #动态申请显存
+session = InteractiveSession(config=config)
 
-def residual_shrinkage_block(incoming, nb_blocks, out_channels, downsample=False,
-                             downsample_strides=2, activation='relu', batch_norm=True,
-                             bias=True, weights_init='variance_scaling',
-                             bias_init='zeros', regularizer='L2', weight_decay=0.0001,
-                             trainable=True, restore=True, reuse=False, scope=None,
-                             name="ResidualBlock"):
-    # residual shrinkage blocks with channel-wise thresholds
+nb_epoch = 100  # number of epoch at training stage
+step=300
+batch_size = 2 # batch size
+val_batch=2
+val_step=50
+lr = 1e-4
+num_class=18
 
-    residual = incoming
-    in_channels = incoming.get_shape().as_list()[-1] #计算出输入通道
+#filename1=generate_filename(image_path="E:/PURE_DATA/real_face_emotion/")
+#filename2=generate_filename(image_path="E:/PURE_DATA/artificial_subject/subject2/")
+filename3=generate_filename(image_path="E:/PURE_DATA/64_data/predict_check1/")#real_face_emotion
+filename4=generate_filename(image_path='E:/PURE_DATA/64_data/subject1/')#64_data/predict_90,64_data/subject1
+#random.shuffle(filename6)
+#filename_train=filename1[22000:26000]#+filename2[0:2500]
+filenameval=filename4#+filename4
 
-    # Variable Scope fix for older TF
-    try:
-        vscope = tf.variable_scope(scope, default_name=name, values=[incoming],
-                                   reuse=reuse)
-    except Exception:
-        vscope = tf.variable_op_scope([incoming], scope, name, reuse=reuse)
+model = Resnet3DBuilder1.encoder_decoder((64, 64, 64, 3))
+sgd=SGD(lr=lr, momentum=0.9, nesterov=True)
+adm=Adam(lr=lr,decay=0.000002)
+def l_im(y_true,y_pred,e=1):
+    #print('y_pred,y_true:',K.mean(y_true,axis=2).shape)
+    #p=K.mean(K.square(K.sum(y_true,axis=(2,3,4))-K.sum(y_pred,axis=(2,3,4))))
+    #p=1-keras.losses.cosine_similarity(K.mean(y_true,axis=(2,3,4)),K.mean(y_pred,axis=(2,3,4)))
+    #p =1- keras.losses.cosine_similarity((K.mean(y_true, axis=(2, 3, 4))-K.mean(y_true)), (K.mean(y_pred, axis=(2, 3, 4))-K.mean(y_pred)))
+    mae=K.mean(K.abs(y_pred-y_true))
+    mse=K.mean(K.square(y_pred-y_true))
+    psnr=(10*K.log(65025/(mse)))/2.303
+    s=tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
 
-    with vscope as scope:
-        name = scope.name  # TODO
+    return 100*mae+s#+s#50*mae+20*mse+s
 
-        for i in range(nb_blocks):
+def l_p(y_true,y_pred):
+    rmse=K.sqrt(K.mean(K.square(y_pred-y_true)))
+    #p = 1 - keras.losses.cosine_similarity((y_pred - K.mean(y_true,axis=(1,2,3,4))),(y_pred - K.mean(y_true,axis=(1,2,3,4))))
+    p=1 + keras.losses.cosine_similarity(y_pred, y_true)
+    #y_t =K.mean(y_true, axis=1)
+    #y_p = K.mean(y_pred, axis=1)
+    #pear = keras.losses.cosine_similarity(K.minimum(y_pred , y_p), K.minimum(y_true , y_t))
+    return rmse
 
-            identity = residual
+def m_im(y_true,y_pred):
+    return 50*K.mean(K.square(y_pred-y_true))
 
-            if not downsample:
-                downsample_strides = 1
+def m_p(y_true,y_pred):
+    p1 = 1+keras.losses.cosine_similarity(y_pred,y_true)
+    return p1
 
-            if batch_norm:
-                residual = tflearn.batch_normalization(residual)
-            residual = tflearn.activation(residual, activation)
-            residual = conv_2d(residual, out_channels, 3,
-                               downsample_strides, 'same', 'linear',
-                               bias, weights_init, bias_init,
-                               regularizer, weight_decay, trainable,
-                               restore)
+losses={'activation_25':l_im}#
+metrics={'activation_25':m_im}#'activation_24':m_im,
+weight={'activation_25':1}
+model.compile(optimizer=adm, loss=losses,loss_weights=weight,metrics=metrics)#loss_weights=weight,
+model.summary()
 
-            if batch_norm:
-                residual = tflearn.batch_normalization(residual)
-            residual = tflearn.activation(residual, activation)
-            residual = conv_2d(residual, out_channels, 3, 1, 'same',
-                               'linear', bias, weights_init,
-                               bias_init, regularizer, weight_decay,
-                               trainable, restore)
+#CENTER-LOSS
+#if isCenterloss:
+lambda_c = 0.3
+feature_size=18
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+hyperparams_name = 'lr{}'.format(lr)
+fname_param = 'supress_noise_1.75%-ubfc.h5'.format(hyperparams_name)
 
-            # get thresholds and apply thresholding
-            abs_mean = tf.reduce_mean(tf.reduce_mean(tf.abs(residual), axis=2, keep_dims=True), axis=1, keep_dims=True)
-            scales = tflearn.fully_connected(abs_mean, out_channels // 4, activation='linear', regularizer='L2',
-                                             weight_decay=0.0001, weights_init='variance_scaling')
-            scales = tflearn.batch_normalization(scales)
-            scales = tflearn.activation(scales, 'relu')
-            scales = tflearn.fully_connected(scales, out_channels, activation='linear', regularizer='L2',
-                                             weight_decay=0.0001, weights_init='variance_scaling')
-            scales = tf.expand_dims(tf.expand_dims(scales, axis=1), axis=1)
-            thres = tf.multiply(abs_mean, tflearn.activations.sigmoid(scales))
-            # soft thresholding
-            residual = tf.multiply(tf.sign(residual), tf.maximum(tf.abs(residual) - thres, 0))
+early_stopping = EarlyStopping(monitor='val_loss', patience=10,mode='min')
+model_checkpoint = ModelCheckpoint(fname_param, monitor='val_loss', verbose=0, save_best_only=True, mode='min')
+model.load_weights('D:\python_code\keras-resnet3d-master\oise-supress\supress_noise_1.75%-ubfc.h5',by_name=True)#lr0.001.BNmain_rmse_complex.h5
 
-            # Downsampling
-            if downsample_strides > 1:
-                identity = tflearn.avg_pool_2d(identity, 1,
-                                               downsample_strides)
+print('=' * 10)
+print("training model...")
 
-            # Projection to new dimension
-            if in_channels != out_channels:
-                if (out_channels - in_channels) % 2 == 0:
-                    ch = (out_channels - in_channels) // 2
-                    identity = tf.pad(identity,
-                                      [[0, 0], [0, 0], [0, 0], [ch, ch]])
-                else:
-                    ch = (out_channels - in_channels) // 2
-                    identity = tf.pad(identity,
-                                      [[0, 0], [0, 0], [0, 0], [ch, ch + 1]])
-                in_channels = out_channels
+history=model.fit_generator(generator = load_data(batch_size,step,18),
+          steps_per_epoch = step,
+          epochs = nb_epoch,
+          verbose = 1,
+          callbacks =[early_stopping, model_checkpoint],
+          shuffle=  True,
+          validation_data=load_data(batch_size, val_step, 18),
+          validation_steps=val_step)
 
-            residual = residual + identity
+'''history=model.fit_generator(generator = read_data(filename_train,batch_size),
+          steps_per_epoch = (len(filename_train) + batch_size - 1) // batch_size,
+          epochs = nb_epoch,
+          verbose = 1,
+          callbacks =[early_stopping, model_checkpoint],
+          shuffle=  True,
+          validation_data = read_data(filenameval,val_batch),
+          validation_steps=len(filenameval)//val_batch)
+          validation_data = load_data(batch_size,val_step,18),
+          validation_steps=val_step
+'''
 
-    return residual
+model.save_weights('{}.BNmain_rmse.h5'.format(hyperparams_name), overwrite=True)
+model.save('0.001_model.h5')
+history_dict=history.history
+train_loss= history_dict['loss']
+val_loss = history_dict['val_loss']
+train_acc= history_dict['activation_25_m_im']
+val_acc = history_dict['val_activation_25_m_im']
+import matplotlib.pyplot as plt
+#绘制损失曲线
+plt.figure()
+plt.plot(range(len(train_loss)), train_loss, label="train_loss")
+plt.plot(range(len(val_loss)), val_loss, label="val_loss")
+plt.legend()
+plt.xlabel('Epochs')
+plt.ylabel('loss')
+plt.title('train')
+plt.savefig('./loss.jpg')
+plt.show()
+plt.figure()
+plt.plot(range(len(train_loss)), train_acc, label="train_acc")
+plt.plot(range(len(val_loss)), val_acc, label="val_acc")
+plt.legend()
+plt.xlabel('Epochs')
+plt.ylabel('loss')
+plt.title('train')
+plt.savefig('./accuracy.jpg')
+plt.show()
+print('train_loss:',train_loss)
+print('val_loss:',val_loss)
+print('train_acc:',train_acc)
+print('val_acc:',val_acc)
 
-def deep_net(x):
-    # Building Deep Residual Shrinkage Network
-    #x = tflearn.input_data(shape=[64,128,128,3])
-    with tf.Graph().as_default():
-        net = tflearn.conv_3d(x, 16, 3, strides=1,regularizer='L2', weight_decay=0.0001) #(64,128,128,3) > (64,128,128,16)
-        net=tflearn.batch_normalization(net)
-        net=tflearn.relu(net)
+print('train_loss:',list(np.float16(train_loss)))
+print('val_loss:',list(np.float16(val_loss)))
+print('train_acc:',list(np.float16(train_acc)))
+print('val_acc:',list(np.float16(val_acc)))
 
-        net = tflearn.avg_pool_3d(net, kernel_size=1,strides=(1,2,2)) #(64,128,128,16) > (64, 64, 64, 16)
-
-        net = tflearn.conv_3d(net, 1, 16, strides=1,regularizer='L2', weight_decay=0.0001) #(64,64,64,16) > (64,64,64,1)
-        net=tflearn.batch_normalization(net)
-        net=tflearn.relu(net)
-
-        net = tflearn.avg_pool_3d(net, kernel_size=1,strides=(1,2,2)) #(64,64,64,1) > (64,32,32,1)
-        net=tf.squeeze(net,-1) #(64,32,32,1) > (64,32,32)
-        net=tf.transpose(net,perm=[0,2,3,1]) #(N,64,32,32) > (N,32,32,64)
-
-        net = residual_shrinkage_block(net, 1, 64) #1是blocks,16是output_channels,(32,32,64) > (32,32,64)
-        net = residual_shrinkage_block(net, 1, 64, downsample=True) #(32,32,64) > (32,32,64)
-        net = residual_shrinkage_block(net, 1, 64, downsample=True) #(32,32,64) >(32,32,64)
-        net = tflearn.batch_normalization(net) #(32,32,64) > (32,32,64),对输入进行归一化
-        net = tflearn.activation(net, 'relu') #
-        net = tflearn.global_avg_pool(net) #输入4维，输出2维，(N,32,32,64) > (N,64)
-        # Regression，回归
-        net = tflearn.fully_connected(net, 64, activation='softmax') #10表示number of units for this layer
-
-    return net
-
-def neg_pearson(m,n): #皮尔森相关性系数是协方差与标准差的比值
-    loss=0
-    for i in range(m.shape[0]):
-        a = m[i, :]
-        b = n[i, :]
-        sum_x = tf.reduce_sum(a)  # x
-        sum_y = tf.reduce_sum(b)  # y
-        sum_xy = tf.reduce_sum(tf.multiply(a, b))  # xy
-        sum_x2 = tf.reduce_sum(tf.multiply(a, a))  # x^2
-        sum_y2 = tf.reduce_sum(tf.multiply(b, b))  # y^2
-        N = m.shape[1]
-        N = tf.to_float(N)  # 不加这一步，整个运算就会出错，tensorflow要求同一类型数据进行运算
-        q = tf.abs((N * sum_x2 - sum_x * sum_x) * (N * sum_y2 - sum_y * sum_y))
-        pearson1 = (N * sum_xy - sum_x * sum_y) / (tf.rsqrt(q) + 0.01)
-        loss += 1 - pearson1
-    loss = loss / tf.to_float(m.shape[0])
-    return loss
-
-#load_data
-dataset1,images,labels=y.get_batch_data()
-X=tf.placeholder(shape=(images.shape[0], 64,128,128,3), dtype=tf.float32)
-Y=tf.placeholder(shape=(images.shape[0],64), dtype=tf.float32)
-dataset=tf.data.Dataset.from_tensor_slices((X,Y))
-dataset=dataset.shuffle(20).batch(3).repeat()
-iterator = dataset.make_initializable_iterator()
-data_element = iterator.get_next()
-
-Y2=tf.placeholder(shape=(3,64), dtype=tf.float32)
-Z=tf.placeholder(shape=(3, 64,128,128,3), dtype=tf.float32)
-y_pred = deep_net(Z)
-train_loss = neg_pearson(y_pred, Y2)
-
-optimizer = tf.train.AdamOptimizer(1e-4).minimize(train_loss)
-
-
-avg_cost=0
-epochs=3
-num_batches=3
-
-with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-    print('2:', tf.test.is_gpu_available())
-    sess.run(tf.global_variables_initializer())
-    sess.run(iterator.initializer, feed_dict={X: images.eval(), Y: labels.eval()})
-    for epoch in range(epochs):
-        print ("EPOCH = ", epoch+1)
-        for i in range(num_batches):
-            batch_xs, batch_ys = sess.run(data_element) #第一个维度由dataset中的batch决定
-            feed_dict={Z: batch_xs, Y2: batch_ys}
-            sess.run(optimizer,feed_dict=feed_dict)
-            cost = sess.run(train_loss,feed_dict=feed_dict)
-            avg_cost += cost / num_batches  # total_batch个循环中的平均值
-            print('cost:', cost)
-        loss = avg_cost / num_batches
-        print('loss:', loss)
