@@ -12,5 +12,7 @@ Overview of our RVG algorithm. Through a given basic image $c$ and a driving vid
 ![image](Fig4encoder-decoder.png)
 Overview of the proposed ED-RPPG model. The ED-RPPG mainly consists of three parts, encoder, bridge and decoder. In the training stage, RVG algorithm provides training data for the encoder and corresponding labels for the decoder. Labels are obtained by subtracting frames ($V_{rPPG}^a$, $V_{rPPG}^b$) with different signal intensity. The amplification factor $\alpha$ is the ratio of the signal intensity.
 
+File 
+
 The encoder-decoer.py file is a model file. You need to train the model with file train.py to obtain the network weights before using it.
 After the pre-training is completed, use the test.py file to test the real data.
