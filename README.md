@@ -1,6 +1,6 @@
 # Remote heart rate estimation based on rPPG amplification
 
-#-------------------------
+#abstract-------------------------
 
 In this article, we propose an encoder-decoder model (ED-RPPG) to amplify the faint skin color changes of the face, so as to improve the signal-to-noise ratio of the target signal, thereby achieving a higher-precision estimation of the BVP signal and heart rate. In addition, we designed a rPPG video generation algorithm (RVG), which can synthesize facial videos containing rPPG information and the corresponding spatiotemporal BVP labels. The proposed method has achieved superior performance on the public-domain PURE and UBFC-RPPG databases.
 
